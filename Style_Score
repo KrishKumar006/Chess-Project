@@ -1,0 +1,167 @@
+import chess
+import chess.pgn
+import chess.engine
+import io
+
+STOCKFISH_PATH = r"C:\Users\casua\OneDrive\Desktop\stockfish\stockfish-windows-x86-64-avx2.exe"  # Update if needed
+
+def eco_style_bonus(pgn_game):
+    """
+    Compute ECO book exit bonus: +0.5 pts per move earlier than ply 20
+    """
+    node = pgn_game
+    ply_count = 0
+    while node.variations:
+        node = node.variations[0]
+        ply_count += 1
+        if node.comment and "book" not in node.comment.lower():
+            break  # found exit from book
+    exit_ply = ply_count
+    bonus = max(0, (20 - exit_ply) * 0.5)
+    return bonus
+
+def sacrifice_style_bonus(pgn_game, engine, time_limit=0.5):
+    """
+    +10 if a sac drops 3+ points, eval >=0 before and stays >=0 for 5 plies after
+    """
+    board = pgn_game.board()
+    moves = list(pgn_game.mainline_moves())
+    bonus_given = False
+
+    for i in range(len(moves) - 5):  # need room for 5 moves after
+        white_before = bin(board.occupied_co[chess.WHITE]).count("1")
+        black_before = bin(board.occupied_co[chess.BLACK]).count("1")
+        mat_before = white_before - black_before
+
+        # Evaluate before move
+        info_before = engine.analyse(board, chess.engine.Limit(time=time_limit))
+        eval_before = info_before["score"].relative.score(mate_score=10000)
+
+        board.push(moves[i])  # make the potential sac move
+
+        white_after = bin(board.occupied_co[chess.WHITE]).count("1")
+        black_after = bin(board.occupied_co[chess.BLACK]).count("1")
+        mat_after = white_after - black_after
+
+        material_drop = abs(mat_after - mat_before)
+
+        if material_drop >= 3:
+            if eval_before is None:
+                continue
+            if eval_before >= 0:
+                eval_good = True
+                tmp_board = board.copy()
+                for j in range(1, 6):
+                    if i + j >= len(moves):
+                        break
+                    tmp_board.push(moves[i + j])
+                    info_future = engine.analyse(tmp_board, chess.engine.Limit(time=time_limit))
+                    future_eval = info_future["score"].relative.score(mate_score=10000)
+                    if future_eval is None or future_eval < 0:
+                        eval_good = False
+                        break
+                if eval_good:
+                    bonus_given = True
+                    break
+    return 10 if bonus_given else 0
+
+
+    for i in range(len(moves) - 5):  # need room for 5 moves after
+        mat_before = board.occupied_co[chess.WHITE].popcount() - board.occupied_co[chess.BLACK].popcount()
+        # Evaluate before move
+        info_before = engine.analyse(board, chess.engine.Limit(time=time_limit))
+        eval_before = info_before["score"].relative.score(mate_score=10000)
+
+        board.push(moves[i])  # make the potential sac move
+        mat_after = board.occupied_co[chess.WHITE].popcount() - board.occupied_co[chess.BLACK].popcount()
+        material_drop = abs(mat_after - mat_before)
+
+        # Check for significant material drop (sac)
+        if material_drop >= 3:
+            # Check eval before sac: side's eval must be >=0
+            if eval_before is None:
+                continue
+
+            if eval_before >= 0:
+                # Check eval stays good for next 5 plies
+                eval_good = True
+                tmp_board = board.copy()
+                for j in range(1, 6):
+                    if i + j >= len(moves):
+                        break
+                    tmp_board.push(moves[i + j])
+                    info_future = engine.analyse(tmp_board, chess.engine.Limit(time=time_limit))
+                    future_eval = info_future["score"].relative.score(mate_score=10000)
+                    if future_eval is None or future_eval < 0:
+                        eval_good = False
+                        break
+                if eval_good:
+                    bonus_given = True
+                    break
+        # continue checking next move
+    return 10 if bonus_given else 0
+
+def top_line_style_bonus(pgn_game, engine, time_limit=0.5):
+    """
+    +2 for each move that's the only best line (second best worse by >=200cp)
+    """
+    board = pgn_game.board()
+    moves = list(pgn_game.mainline_moves())
+    bonus = 0
+
+    for move in moves:
+        board.push(move)
+        info = engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=2)
+        # multipv=2 gives top two moves
+        if len(info) < 2:
+            continue
+        first_cp = info[0]["score"].relative.score(mate_score=10000)
+        second_cp = info[1]["score"].relative.score(mate_score=10000)
+
+        if first_cp is None or second_cp is None:
+            continue
+
+        # Large difference = unique top move
+        if abs(first_cp - second_cp) >= 200:
+            bonus += 2
+
+    return bonus
+
+def compute_style_score_from_pgn(pgn_string, time_limit=0.5):
+    game = chess.pgn.read_game(io.StringIO(pgn_string.strip()))
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+
+    score = 0
+    score += eco_style_bonus(game)
+    score += sacrifice_style_bonus(game, engine, time_limit)
+    score += top_line_style_bonus(game, engine, time_limit)
+
+    engine.quit()
+    return score
+
+if __name__ == "__main__":
+    pgn = """
+[Event "Candidates SF"]
+[Site "Leningrad URS"]
+[Date "1974.04.11"]
+[Round "6"]
+[White "Anatoly Karpov"]
+[Black "Boris Spassky"]
+[Result "1-0"]
+[ECO "C69"]
+[WhiteElo ""]
+[BlackElo ""]
+[TimeControl "40/150:20/60:SD/"]
+[Termination "Normal"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 
+9. h3 Nb8 10. d4 Nbd7 11. Nbd2 Bb7 12. Bc2 Re8 13. Nf1 Bf8 14. Ng3 g6 15. a4 c5 
+16. d5 c4 17. Be3 Qc7 18. Qd2 Nc5 19. Bh6 Be7 20. Rf1 Reb8 21. Nh2 Bc8 22. f4 exf4 
+23. Qxf4 Qd8 24. Nf3 bxa4 25. e5 dxe5 26. Nxe5 Rxb2 27. Nc6 Qd6 28. Nxe7+ Qxe7 
+29. Rae1 Qd8 30. Bg5 Rxc2 31. Bxf6 Qf8 32. Be7 Nd3 33. Qf6 Qg7 34. Qc6 Rb8 
+35. Qe8+ Qf8 36. Bxf8 Bxh3 37. Bh6+ Rxe8 38. Rxe8#
+1-0
+"""
+
+    style_score = compute_style_score_from_pgn(pgn, time_limit=0.5)
+    print(f"Style score for PGN: {style_score:.2f}")
