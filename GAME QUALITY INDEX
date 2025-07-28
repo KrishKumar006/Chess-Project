@@ -1,0 +1,234 @@
+import chess
+import chess.pgn
+import chess.engine
+import io
+import math
+import multiprocessing
+from functools import partial
+
+
+STOCKFISH_PATH = r"STOCKFISH PATH HERE"
+
+# --- Technical Score ---
+def compute_technical_score_from_pgn(pgn_string, engine, time_limit=0.3):
+    game = chess.pgn.read_game(io.StringIO(pgn_string.strip()))
+    board = game.board()
+
+    evals = []
+    acpl_sum = 0
+    blunders = 0
+    prev_eval_cp = None
+
+    moves = list(game.mainline_moves())
+
+    for move in moves:
+        board.push(move)
+        info = engine.analyse(board, chess.engine.Limit(time=time_limit))
+        score = info["score"].relative
+
+        cp = None if score.is_mate() else score.score()
+        evals.append(cp)
+
+        if prev_eval_cp is not None and cp is not None:
+            diff = abs(cp - prev_eval_cp)
+            acpl_sum += diff
+            if diff >= 300:
+                blunders += 1
+
+        prev_eval_cp = cp
+
+    num_moves = max(1, len([e for e in evals if e is not None]) - 1)
+    avg_acpl = acpl_sum / num_moves
+
+    technical = 100 - min(100, 0.04 * avg_acpl) - 3 * blunders
+    return max(0, technical)
+
+# --- Drama Score ---
+def compute_drama_from_pgn(pgn_string, engine, time_limit=0.5):
+    game = chess.pgn.read_game(io.StringIO(pgn_string.strip()))
+    board = game.board()
+
+    esi = 0
+    lead_changes = 0
+    prev_eval = None
+    prev_sign = 0
+
+    moves = list(game.mainline_moves())
+
+    for move in moves:
+        board.push(move)
+        info = engine.analyse(board, chess.engine.Limit(time=time_limit))
+        score = info["score"].relative
+
+        if score.is_mate():
+            break
+
+        cp = score.score()
+
+        if prev_eval is not None:
+            swing = abs(cp - prev_eval)
+            if swing >= 150:
+                esi += swing
+
+            current_sign = 1 if cp > 0 else (-1 if cp < 0 else 0)
+            if current_sign != 0 and prev_sign != 0 and current_sign != prev_sign:
+                lead_changes += 1
+
+            prev_sign = current_sign
+
+        prev_eval = cp
+
+    drama = 10 * math.sqrt(esi) + 5 * lead_changes
+    if drama > 100:
+        drama = 0
+    else:
+        drama = 100 - drama
+    return drama
+
+# --- Style Score ---
+def eco_style_bonus(pgn_game):
+    node = pgn_game
+    ply_count = 0
+    while node.variations:
+        node = node.variations[0]
+        ply_count += 1
+        if node.comment and "book" not in node.comment.lower():
+            break
+    exit_ply = ply_count
+    return max(0, (20 - exit_ply) * 0.5)
+
+def sacrifice_style_bonus(pgn_game, engine, time_limit=0.5):
+    board = pgn_game.board()
+    moves = list(pgn_game.mainline_moves())
+    bonus_given = False
+
+    for i in range(len(moves) - 5):
+        white_before = bin(board.occupied_co[chess.WHITE]).count("1")
+        black_before = bin(board.occupied_co[chess.BLACK]).count("1")
+        mat_before = white_before - black_before
+
+        info_before = engine.analyse(board, chess.engine.Limit(time=time_limit))
+        eval_before = info_before["score"].relative.score(mate_score=10000)
+
+        board.push(moves[i])
+
+        white_after = bin(board.occupied_co[chess.WHITE]).count("1")
+        black_after = bin(board.occupied_co[chess.BLACK]).count("1")
+        mat_after = white_after - black_after
+
+        material_drop = abs(mat_after - mat_before)
+
+        if material_drop >= 3 and eval_before is not None and eval_before >= 0:
+            eval_good = True
+            tmp_board = board.copy()
+            for j in range(1, 6):
+                if i + j >= len(moves):
+                    break
+                tmp_board.push(moves[i + j])
+                info_future = engine.analyse(tmp_board, chess.engine.Limit(time=time_limit))
+                future_eval = info_future["score"].relative.score(mate_score=10000)
+                if future_eval is None or future_eval < 0:
+                    eval_good = False
+                    break
+            if eval_good:
+                bonus_given = True
+                break
+    return 10 if bonus_given else 0
+
+def top_line_style_bonus(pgn_game, engine, time_limit=0.5):
+    board = pgn_game.board()
+    moves = list(pgn_game.mainline_moves())
+    bonus = 0
+
+    for move in moves:
+        board.push(move)
+        info = engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=2)
+        if len(info) < 2:
+            continue
+        first_cp = info[0]["score"].relative.score(mate_score=10000)
+        second_cp = info[1]["score"].relative.score(mate_score=10000)
+        if first_cp is None or second_cp is None:
+            continue
+        if abs(first_cp - second_cp) >= 200:
+            bonus += 2
+    return bonus
+
+def compute_style_score_from_pgn(pgn_string, engine, time_limit=0.5):
+    game = chess.pgn.read_game(io.StringIO(pgn_string.strip()))
+    score = 0
+    score += eco_style_bonus(game)
+    score += sacrifice_style_bonus(game, engine, time_limit)
+    score += top_line_style_bonus(game, engine, time_limit)
+    return score
+
+# --- PGN Reader ---
+def read_pgn_blocks(file_obj):
+    pgn_lines = []
+    for line in file_obj:
+        stripped = line.rstrip()
+        if stripped == "" and pgn_lines:
+            yield "\n".join(pgn_lines)
+            pgn_lines = []
+        else:
+            pgn_lines.append(line.rstrip())
+    if pgn_lines:
+        yield "\n".join(pgn_lines)
+
+# --- Batch Processor ---
+def init_worker():
+    global engine
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+
+def close_worker():
+    global engine
+    engine.quit()
+
+def evaluate_single_game_worker(args):
+    pgn_text, time_limit_tech, time_limit_style, time_limit_drama, pgn_num = args
+    try:
+        technical = compute_technical_score_from_pgn(pgn_text, engine, time_limit_tech)
+        drama = compute_drama_from_pgn(pgn_text, engine, time_limit_drama)
+        style = compute_style_score_from_pgn(pgn_text, engine, time_limit_style)
+        gqi = 0.5 * technical + 0.3 * drama + 0.2 * style
+
+        result_line = (
+            f"Game {pgn_num}: Technical = {technical:.2f}, Drama = {drama:.2f}, "
+            f"Style = {style:.2f}, GQI = {gqi:.2f}"
+        )
+        return (gqi, result_line)
+
+    except Exception as e:
+        return (float('-inf'), f"Game {pgn_num}: Error - {str(e)}")
+
+def process_pgn_file(input_path, output_path, time_limit_tech=0.3, time_limit_style=0.5, time_limit_drama=0.5):
+    with open(input_path, "r", encoding="utf-8") as f_in:
+        pgn_blocks = list(read_pgn_blocks(f_in))
+
+    args = [
+        (pgn_text.strip(), time_limit_tech, time_limit_style, time_limit_drama, i + 1)
+        for i, pgn_text in enumerate(pgn_blocks) if pgn_text.strip()
+    ]
+
+    cpu_count = multiprocessing.cpu_count()
+    with multiprocessing.Pool(
+        processes=cpu_count,
+        initializer=init_worker,
+        maxtasksperchild=20
+    ) as pool:
+        results = list(pool.imap_unordered(evaluate_single_game_worker, args, chunksize=10))
+        pool.close()
+        pool.join()
+
+    results.sort(key=lambda x: x[0], reverse=True)
+
+    with open(output_path, "w", encoding="utf-8") as f_out:
+        for _, line in results:
+            f_out.write(line + "\n")
+
+# --- Entry Point ---
+if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn")  # Safe on Windows
+    input_file = "pgns.txt"
+    output_file = "gqi_output.txt"
+    process_pgn_file(input_file, output_file)
+    print(f"Processing complete. Results saved to {output_file}")
