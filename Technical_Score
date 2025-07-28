@@ -1,0 +1,91 @@
+import chess
+import chess.pgn
+import chess.engine
+import io
+
+STOCKFISH_PATH = r"C:\Users\casua\OneDrive\Desktop\stockfish\stockfish-windows-x86-64-avx2.exe"
+
+def compute_technical_score_from_pgn(pgn_string, time_limit=0.3):
+    game = chess.pgn.read_game(io.StringIO(pgn_string.strip()))
+    if game is None:
+        print("PGN parsing failed.")
+        return 0
+
+    board = game.board()
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+
+    evals = []
+    acpl_sum = 0
+    blunders = 0
+    prev_eval_cp = None
+
+    moves = list(game.mainline_moves())
+    print(f"Total moves: {len(moves)}")
+
+    for i, move in enumerate(moves):
+        board.push(move)
+        try:
+            info = engine.analyse(board, chess.engine.Limit(time=time_limit))
+        except Exception as e:
+            print(f"Engine failed at move {i}: {e}")
+            evals.append(None)
+            continue
+
+        score = info["score"].relative
+        if score.is_mate():
+            cp = None  # Completely skip for ACPL/blunder calculations
+        else:
+            cp = score.score()
+
+        evals.append(cp)
+        print(f"Move {i+1}: {move}, Eval: {cp}")
+
+        if prev_eval_cp is not None and cp is not None:
+            diff = abs(cp - prev_eval_cp)
+            acpl_sum += diff
+            if diff >= 300:
+                blunders += 1
+
+        prev_eval_cp = cp
+
+    engine.quit()
+
+    evals_non_none = [e for e in evals if e is not None]
+    num_moves = max(1, len(evals_non_none) - 1)
+    avg_acpl = acpl_sum / num_moves
+
+    print(f"ACPL sum: {acpl_sum}")
+    print(f"Blunders: {blunders}")
+    print(f"Avg ACPL: {avg_acpl}")
+    print(f"Eval count: {len(evals_non_none)}")
+
+    technical = 100 - min(100, 0.04 * avg_acpl) - 3 * blunders
+    final_score = max(0, technical)
+    print(f"Technical score: {final_score}")
+    return final_score
+
+# Example PGN (Insert your PGN here)
+pgn = """
+[Event "Candidates SF"]
+[Site "Leningrad URS"]
+[Date "1974.04.11"]
+[Round "6"]
+[White "Anatoly Karpov"]
+[Black "Boris Spassky"]
+[Result "1-0"]
+[ECO "C69"]
+[WhiteElo ""]
+[BlackElo ""]
+[TimeControl "40/150:20/60:SD/"]
+[Termination "Normal"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 
+9. h3 Nb8 10. d4 Nbd7 11. Nbd2 Bb7 12. Bc2 Re8 13. Nf1 Bf8 14. Ng3 g6 15. a4 c5 
+16. d5 c4 17. Be3 Qc7 18. Qd2 Nc5 19. Bh6 Be7 20. Rf1 Reb8 21. Nh2 Bc8 22. f4 exf4 
+23. Qxf4 Qd8 24. Nf3 bxa4 25. e5 dxe5 26. Nxe5 Rxb2 27. Nc6 Qd6 28. Nxe7+ Qxe7 
+29. Rae1 Qd8 30. Bg5 Rxc2 31. Bxf6 Qf8 32. Be7 Nd3 33. Qf6 Qg7 34. Qc6 Rb8 
+35. Qe8+ Qf8 36. Bxf8 Bxh3 37. Bh6+ Rxe8 38. Rxe8#
+1-0
+"""
+
+compute_technical_score_from_pgn(pgn)
