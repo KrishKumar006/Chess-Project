@@ -4,7 +4,7 @@ import chess.engine
 import io
 import math
 
-STOCKFISH_PATH = r"C:\Users\casua\OneDrive\Desktop\stockfish\stockfish-windows-x86-64-avx2.exe"
+STOCKFISH_PATH = r"STOCKFISH PATH HERE"
 
 def compute_drama_from_pgn(pgn_string, time_limit=0.5):
     game = chess.pgn.read_game(io.StringIO(pgn_string.strip()))
