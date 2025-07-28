@@ -3,7 +3,7 @@ import chess.pgn
 import chess.engine
 import io
 
-STOCKFISH_PATH = r"C:\Users\casua\OneDrive\Desktop\stockfish\stockfish-windows-x86-64-avx2.exe"  # Update if needed
+STOCKFISH_PATH = r"STOCKFISH PATH HERE"
 
 def eco_style_bonus(pgn_game):
     """
