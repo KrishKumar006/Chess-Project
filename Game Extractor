@@ -2,6 +2,45 @@ import zstandard as zstd
 import io
 import random
 import os
+import re
+
+# Headers to keep and in what order
+PGN_HEADER_KEYS = ["Event", "Site", "Date", "Round", "White", "Black", "Result", "ECO"]
+
+
+def clean_verbose_pgn_moves(game_text: str) -> str:
+    # Split into lines
+    lines = game_text.strip().split('\n')
+
+    # Separate headers and moves
+    headers_raw = [line for line in lines if line.startswith('[')]
+    moves_raw = [line for line in lines if not line.startswith('[')]
+
+    # Extract only relevant headers in correct order
+    header_dict = {}
+    for line in headers_raw:
+        match = re.match(r'\[(\w+)\s+"(.*?)"\]', line)
+        if match:
+            key, value = match.groups()
+            if key in PGN_HEADER_KEYS:
+                header_dict[key] = value
+
+    headers_clean = [f'[{key} "{header_dict.get(key, "?")}"]' for key in PGN_HEADER_KEYS]
+
+    # Join all moves to one line
+    move_text = ' '.join(moves_raw)
+
+    # Remove curly brace annotations
+    move_text = re.sub(r'\{[^}]*\}', '', move_text)
+
+    # Remove verbose black move numbers (e.g., "1... Nf6")
+    move_text = re.sub(r'\b\d+\.\.\.\s*', '', move_text)
+
+    # Collapse multiple spaces
+    move_text = re.sub(r'\s+', ' ', move_text).strip()
+
+    return '\n'.join(headers_clean + [move_text])
+
 
 def extract_sample_first_n(zst_path, output_path, max_games=100000, sample_size=10000):
     if not os.path.exists(zst_path):
@@ -20,13 +59,13 @@ def extract_sample_first_n(zst_path, output_path, max_games=100000, sample_size=
         for line in text_stream:
             line = line.rstrip('\n\r')
             if not line.strip():
-                # Skip empty lines inside games to avoid blank lines inside PGN
                 continue
 
             if line.startswith('[Event '):
                 if current_game:
                     game_text = '\n'.join(current_game)
-                    reservoir.append(game_text)
+                    cleaned_game = clean_verbose_pgn_moves(game_text)
+                    reservoir.append(cleaned_game)
                     total_games += 1
                     if total_games >= max_games:
                         break
@@ -35,10 +74,11 @@ def extract_sample_first_n(zst_path, output_path, max_games=100000, sample_size=
             else:
                 current_game.append(line)
 
-        # Add the last game if exists
+        # Final game
         if current_game and total_games < max_games:
             game_text = '\n'.join(current_game)
-            reservoir.append(game_text)
+            cleaned_game = clean_verbose_pgn_moves(game_text)
+            reservoir.append(cleaned_game)
             total_games += 1
 
     print(f"Total games found: {total_games}")
@@ -51,13 +91,12 @@ def extract_sample_first_n(zst_path, output_path, max_games=100000, sample_size=
     sampled_games = random.sample(reservoir, sample_count)
 
     with open(output_path, 'w', encoding='utf-8') as out_file:
-        # Exactly one blank line between games
         out_file.write('\n\n'.join(sampled_games))
 
     print(f"Saved {sample_count} sampled games to {output_path}")
 
 
 if __name__ == "__main__":
-    zst_file = r"ZST FILE LOCATION HERE"
+    zst_file = r"C:\Users\casua\Downloads\lichess_db_standard_rated_2024-02.pgn.zst"
     output_file = "pgns.txt"
-    extract_sample_first_n(zst_file, output_file, max_games=1000, sample_size=1000)
+    extract_sample_first_n(zst_file, output_file, max_games=1, sample_size=1000)
