@@ -3,11 +3,8 @@ import chess.pgn
 import chess.engine
 import io
 import math
-import multiprocessing
-from functools import partial
 
-
-STOCKFISH_PATH = r"STOCKFISH PATH HERE"
+STOCKFISH_PATH = r"C:\Users\casua\OneDrive\Desktop\stockfish\stockfish-windows-x86-64-avx2.exe"
 
 # --- Technical Score ---
 def compute_technical_score_from_pgn(pgn_string, engine, time_limit=0.3):
@@ -40,7 +37,7 @@ def compute_technical_score_from_pgn(pgn_string, engine, time_limit=0.3):
     num_moves = max(1, len([e for e in evals if e is not None]) - 1)
     avg_acpl = acpl_sum / num_moves
 
-    technical = 100 - min(100, 0.04 * avg_acpl) - 3 * blunders
+    technical = 100 - min(100, 0.4 * avg_acpl) - 5 * blunders
     return max(0, technical)
 
 # --- Drama Score ---
@@ -79,10 +76,6 @@ def compute_drama_from_pgn(pgn_string, engine, time_limit=0.5):
         prev_eval = cp
 
     drama = 10 * math.sqrt(esi) + 5 * lead_changes
-    if drama > 100:
-        drama = 0
-    else:
-        drama = 100 - drama
     return drama
 
 # --- Style Score ---
@@ -175,59 +168,30 @@ def read_pgn_blocks(file_obj):
         yield "\n".join(pgn_lines)
 
 # --- Batch Processor ---
-def init_worker():
-    global engine
-    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-
-def close_worker():
-    global engine
-    engine.quit()
-
-def evaluate_single_game_worker(args):
-    pgn_text, time_limit_tech, time_limit_style, time_limit_drama, pgn_num = args
-    try:
-        technical = compute_technical_score_from_pgn(pgn_text, engine, time_limit_tech)
-        drama = compute_drama_from_pgn(pgn_text, engine, time_limit_drama)
-        style = compute_style_score_from_pgn(pgn_text, engine, time_limit_style)
-        gqi = 0.5 * technical + 0.3 * drama + 0.2 * style
-
-        result_line = (
-            f"Game {pgn_num}: Technical = {technical:.2f}, Drama = {drama:.2f}, "
-            f"Style = {style:.2f}, GQI = {gqi:.2f}"
-        )
-        return (gqi, result_line)
-
-    except Exception as e:
-        return (float('-inf'), f"Game {pgn_num}: Error - {str(e)}")
-
 def process_pgn_file(input_path, output_path, time_limit_tech=0.3, time_limit_style=0.5, time_limit_drama=0.5):
-    with open(input_path, "r", encoding="utf-8") as f_in:
-        pgn_blocks = list(read_pgn_blocks(f_in))
+    with open(input_path, "r", encoding="utf-8") as f_in, open(output_path, "w", encoding="utf-8") as f_out:
+        engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
-    args = [
-        (pgn_text.strip(), time_limit_tech, time_limit_style, time_limit_drama, i + 1)
-        for i, pgn_text in enumerate(pgn_blocks) if pgn_text.strip()
-    ]
+        for pgn_num, pgn_text in enumerate(read_pgn_blocks(f_in), 1):
+            pgn_text = pgn_text.strip()
+            if not pgn_text:
+                continue
+            try:
+                technical = compute_technical_score_from_pgn(pgn_text, engine, time_limit_tech)
+                drama = compute_drama_from_pgn(pgn_text, engine, time_limit_drama)
+                style = compute_style_score_from_pgn(pgn_text, engine, time_limit_style)
+                gqi = 0.5 * technical + 0.3 * drama + 0.2 * style
 
-    cpu_count = multiprocessing.cpu_count()
-    with multiprocessing.Pool(
-        processes=cpu_count,
-        initializer=init_worker,
-        maxtasksperchild=20
-    ) as pool:
-        results = list(pool.imap_unordered(evaluate_single_game_worker, args, chunksize=10))
-        pool.close()
-        pool.join()
+                f_out.write(
+                    f"Game {pgn_num}: Technical = {technical:.2f}, Drama = {drama:.2f}, Style = {style:.2f}, GQI = {gqi:.2f}\n"
+                )
+            except Exception as e:
+                f_out.write(f"Game {pgn_num}: Error - {str(e)}\n")
 
-    results.sort(key=lambda x: x[0], reverse=True)
-
-    with open(output_path, "w", encoding="utf-8") as f_out:
-        for _, line in results:
-            f_out.write(line + "\n")
+        engine.quit()
 
 # --- Entry Point ---
 if __name__ == "__main__":
-    multiprocessing.set_start_method("spawn")  # Safe on Windows
     input_file = "pgns.txt"
     output_file = "gqi_output.txt"
     process_pgn_file(input_file, output_file)
