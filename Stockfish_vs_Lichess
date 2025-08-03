@@ -1,0 +1,76 @@
+import chess
+import chess.pgn
+import chess.engine
+import requests
+
+STOCKFISH_PATH = r"YOUR PATH HERE"
+OUTPUT_FILE = "pgns.txt"
+NUM_GAMES = 5
+MAX_MOVES = 200
+
+def get_lichess_best_move(fen):
+    url = f"https://lichess.org/api/cloud-eval?fen={fen}&multiPv=1"
+    try:
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            move_uci = data["pvs"][0]["moves"].split()[0]
+            return move_uci
+    except Exception as e:
+        print("Lichess API error:", e)
+    return None
+
+def simulate_game(game_num, stockfish_path):
+    board = chess.Board()
+    game = chess.pgn.Game()
+    game.headers["Event"] = f"Game {game_num}"
+    game.headers["White"] = "LichessCloud"
+    game.headers["Black"] = "Stockfish"
+
+    node = game
+
+    with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
+        while not board.is_game_over() and board.fullmove_number <= MAX_MOVES:
+            if board.turn == chess.WHITE:
+                fen = board.fen()
+                move_uci = get_lichess_best_move(fen)
+                if move_uci is None:
+                    print("Lichess failed to respond. Ending game early.")
+                    break
+                move = chess.Move.from_uci(move_uci)
+                if move not in board.legal_moves:
+                    print("Illegal move from Lichess:", move_uci)
+                    break
+            else:
+                result = engine.play(board, chess.engine.Limit(time=0.2))
+                move = result.move
+
+            board.push(move)
+            node = node.add_variation(move)
+
+        game.headers["Result"] = board.result()
+
+        exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
+        pgn_string = game.accept(exporter)
+
+        lines = pgn_string.strip().split("\n")
+        headers = [line for line in lines if line.startswith("[")]
+        moves = [line for line in lines if not line.startswith("[")]
+        move_line = " ".join(moves).strip()
+        return "\n".join(headers) + "\n" + move_line
+
+def generate_games():
+    games = []
+    for i in range(1, NUM_GAMES + 1):
+        print(f"Simulating Game {i}...")
+        game_text = simulate_game(i, STOCKFISH_PATH)
+        if game_text:
+            games.append(game_text)
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(games))
+
+    print(f"\nSaved {len(games)} games to {OUTPUT_FILE}")
+
+if __name__ == "__main__":
+    generate_games()
